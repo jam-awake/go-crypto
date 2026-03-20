@@ -448,13 +448,13 @@ func newDecrypter(config *packet.Config) (decrypter interface{}, err error) {
 
 var bigOne = big.NewInt(1)
 
-// generateRSAKey generates an RSA keypair and ensures that p < q as required by RFC 4880.
+// generateRSAKey generates an RSA keypair and ensures that p < q as required by RFC 9580.
 func generateRSAKey(random io.Reader, bits int) (*rsa.PrivateKey, error) {
 	key, err := rsa.GenerateKey(random, bits)
 	if err != nil {
 		return nil, err
 	}
-	// RFC 4880 section 5.5.3 requires p < q for RSA keys.
+	// RFC 9580 section 5.5.5.1 requires p < q for RSA keys.
 	// The Go standard library does not guarantee this, so we swap if needed
 	// and recompute the precomputed values.
 	if len(key.Primes) == 2 && key.Primes[0].Cmp(key.Primes[1]) > 0 {
@@ -547,7 +547,7 @@ NextSetOfPrimes:
 		}
 	}
 
-	// RFC 4880 section 5.5.3 requires p < q for RSA keys.
+	// RFC 9580 section 5.5.5.1 requires p < q for RSA keys.
 	if len(priv.Primes) == 2 && priv.Primes[0].Cmp(priv.Primes[1]) > 0 {
 		priv.Primes[0], priv.Primes[1] = priv.Primes[1], priv.Primes[0]
 	}
