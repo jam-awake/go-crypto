@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"fmt"
+	"io"
 	"math/big"
 	"strconv"
 	"strings"
@@ -2110,6 +2111,37 @@ func TestEncryptionKeyError(t *testing.T) {
 	}
 }
 
+type DeterministicReader struct {
+	data []byte
+	// tracks the current read position in the data buffer
+	offset int
+}
+
+func (r *DeterministicReader) Read(p []byte) (n int, err error) {
+	if r.offset >= len(r.data) {
+		return 0, io.EOF
+	}
+
+	if len(p) == 0 {
+		return 0, nil
+	}
+
+	remaining := len(r.data) - r.offset
+	n = len(p)
+	if n > remaining {
+		n = remaining
+	}
+
+	copy(p, r.data[r.offset:r.offset+n])
+	r.offset += n
+
+	if r.offset >= len(r.data) {
+		return n, io.EOF
+	}
+
+	return n, nil
+}
+
 func TestGenerateRSAKeyPLessThanQ(t *testing.T) {
 	// Hard-coded primes for a 2048-bit RSA key were taken from https://github.com/jam-awake/gpg-verify-bug
 	// using key with fingerprint: 2A25F94C4E482847305AB91E46EF00DD763B1D37
@@ -2122,32 +2154,95 @@ func TestGenerateRSAKeyPLessThanQ(t *testing.T) {
 	q := new(big.Int)
 	q.SetString(qHex, 16)
 
-	// Ensure RFC 9580's `p < q` requirement is NOT satisfied
+	// Ensure RFC 9580's `p < q` requirement is NOT satisfied initially
 	if p.Cmp(q) == -1 {
-		t.Fatal(fmt.Printf("Expected `p < q` constraint to be unsatisifed. \np: %d\nq: %d\n", p, q))
+		t.Fatal(fmt.Printf("Expected `p < q` constraint to be unsatisfied. \np: %d\nq: %d\n", p, q))
 	}
 
-	primes := []*big.Int{p, q}
 	bits := 2048
+	primeSize := bits / 8
 
-	// Generate RSA key with the hard-coded primes
-	key, err := generateRSAKeyWithPrimes(rand.Reader, 2, bits, primes)
-	if err != nil {
-		t.Fatalf("Failed to generate RSA key with primes: %v", err)
+	createReader := func() *DeterministicReader {
+		readerBuffer := make([]byte, primeSize*2)
+		p.FillBytes(readerBuffer[primeSize:])
+		q.FillBytes(readerBuffer[:primeSize])
+		return &DeterministicReader{
+			data:   readerBuffer,
+			offset: 0,
+		}
 	}
 
-	// Verify the key was generated correctly
-	if key == nil {
-		t.Fatal("Generated key is nil")
+	verifyRSAKey := func(t *testing.T, key *rsa.PrivateKey, err error) {
+		t.Helper()
+
+		if err != nil {
+			t.Fatalf("Failed to generate RSA key: %v", err)
+		}
+
+		if key == nil {
+			t.Fatal("Generated key is nil")
+		}
+
+		if len(key.Primes) != 2 {
+			t.Fatalf("Expected 2 primes, got %d", len(key.Primes))
+		}
+
+		if key.Primes[0].Cmp(key.Primes[1]) != -1 {
+			t.Fatal("Prime in p slot should be less than prime in q slot")
+		}
+
+		pPrime := key.Primes[1]
+		qPrime := key.Primes[0]
+		if p.Cmp(pPrime) != 0 || q.Cmp(qPrime) != 0 {
+			t.Fatalf(
+				"Expected outputted primes to match inputted ones.\n"+
+					"p:  %d\n"+
+					"p': %d\n"+
+					"q:  %d\n"+
+					"q': %d",
+				p,
+				pPrime,
+				q,
+				qPrime,
+			)
+		}
 	}
 
-	// Verify the key has exactly 2 primes
-	if len(key.Primes) != 2 {
-		t.Fatalf("Expected 2 primes, got %d", len(key.Primes))
+	tests := []struct {
+		name        string
+		generateKey func(reader *DeterministicReader) (*rsa.PrivateKey, error)
+	}{
+		{
+			name: "generateRSAKeyWithPrimes",
+			generateKey: func(reader *DeterministicReader) (*rsa.PrivateKey, error) {
+				noPrepopulatedPrimes := []*big.Int{}
+				return generateRSAKeyWithPrimes(reader, 2, bits, noPrepopulatedPrimes)
+			},
+		},
+		{
+			name: "generateRSAKey",
+			generateKey: func(reader *DeterministicReader) (*rsa.PrivateKey, error) {
+				return generateRSAKey(reader, bits)
+			},
+		},
 	}
 
-	// Verify p < q as required by RFC 9580
-	if key.Primes[0].Cmp(key.Primes[1]) != -1 {
-		t.Error("Prime p should be less than prime q")
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			for i := 0; i < 20; i++ {
+				reader := createReader()
+				key, err := testCase.generateKey(reader)
+
+				if err == io.ErrUnexpectedEOF {
+					t.Logf("Failed to generate key on attempt %d. "+
+						// In other words, the outputted integer didn't pass the ProbablyPrime test.
+						"Could not find two valid primes in the buffer before it ran out of data. "+
+						"Retrying...", i)
+					continue
+				}
+				verifyRSAKey(t, key, err)
+				break
+			}
+		})
 	}
 }
